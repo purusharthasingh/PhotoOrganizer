@@ -1,0 +1,25 @@
+# PhotoOrganizer configuration. Lives in the project; each scanned root keeps
+# its own manifest in <root>/.photoorganizer/.
+
+[library]
+# Default root when a command is run without one.
+root = "sample_photos"
+
+[scan]
+# Folders whose name only says what file format is inside. They are ignored when
+# working out a capture's folder hint, so Trip/Raw/X.NEF and Trip/X.JPG are both in "Trip".
+# Matching is case-insensitive.
+format_subfolders = ["raw", "nef", "jpg", "jpeg"]
+
+# Folder names never scanned (case-insensitive), at any depth.
+skip_dirs = ["_quarantine", ".photoorganizer"]
+
+# Warn about absolute paths longer than this (Windows MAX_PATH is 260).
+path_warn_length = 240
+
+# File extensions per kind (case-insensitive, with the dot).
+[scan.extensions]
+nef  = [".nef"]
+jpg  = [".jpg", ".jpeg"]
+heic = [".heic", ".heif"]
+xmp  = [".xmp"]

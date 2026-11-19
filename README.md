@@ -198,7 +198,7 @@ The setting only helps programs that support long paths, such as Python. Some to
 ### Stage 0 — Backup
 
 - Follow the 3-2-1 rule: 3 copies, on 2 kinds of media, with 1 offsite. **Do this before running anything else.**
-- Generate a sha256 manifest of every file in the library. Later stages and the cleanup verification compare against it.
+- Generate a manifest of every file in the library, recording both the full sha256 and the `ImageDataHash`. Later stages and the cleanup verification compare against it. Once the pipeline writes embedded XMP into a JPG/HEIC, that file's full sha256 changes by design, so JPG/HEIC integrity is checked by `ImageDataHash`.
 
 ### Stage 1 — Scan (any folder layout)
 
@@ -257,9 +257,12 @@ exiftool -r -json -n -ext NEF -ext JPG -ext JPEG -ext HEIC `
    | `jpg_only` | No confirmed NEF partner | One capture, one file |
    | `single` | Phone photo (HEIC/JPEG), never paired | One capture, one file |
 
+   A JPG counts as a **camera** JPG (so it can be `paired` or `jpg_only`) if it has a `ShutterCount` or its `Make` is Nikon. Every other JPG, and every HEIC, is `single`.
+
    Every status flows through Analyze → Group → Flag → Review → Cleanup in the same way. A decision applies to all files that exist for the capture, whether that's one or two.
 6. **`capture_id`** = `SerialNumber_ShutterCount_DTO+SubSec`. It is computed from whichever file exists, so a pair and a lone file are handled the same way.
-   - Proposed fallback for phones, which have no shutter count: `Model_DTO+SubSec_<first 8 chars of sha256>`.
+   - Fallback for phones, which have no shutter count: `Model_DTO+SubSec_<first 8 chars of ImageDataHash>`. It uses the image-data hash, not the full-file sha256, because the full-file hash changes once XMP is written into the file.
+   - The same fallback applies to a camera file missing `SerialNumber`, `ShutterCount` or SubSec (e.g. a JPG re-saved by an editor). `check` warns about every capture that needed it.
 7. **Re-scans stay stable.** If a partner shows up later (copied back in, say), the next scan upgrades `nef_only`/`jpg_only` to `paired` under the same `capture_id`. If one file of a pair disappears, it downgrades the capture the same way. Existing decisions are kept.
 
 #### Duplicate copies
@@ -341,9 +344,9 @@ Group IDs are written into XMP keywords, so they must be **stable across re-runs
 |---|---|---|
 | Burst (per camera) | `<YYYYMMDD-HHMMSS.ss of first frame>-<camera model>` | `burst\|20201205-204145.96-D780` |
 | Scene | `<YYYYMMDD-HHMM of first frame>-<folder slug>` | `scene\|20251029-1139-puerto-rico-26` |
-| Near-duplicate set | `capture_id` of the earliest member | `dup\|3004822_614_20201205-204145.96` |
+| Near-duplicate set | `capture_id` of the earliest member | `dup\|3004822_610_20201205-204145.96` |
 | Subject cluster | `<scene_id>/<n>`, with `n` numbered by each cluster's earliest frame (HDBSCAN labels themselves are arbitrary) | `subject\|20251029-1139-puerto-rico-26/2` |
-| Duplicate copy | `capture_id` of the keeper | `dupcopy\|3004822_614_20201205-204145.96` |
+| Duplicate copy | `capture_id` of the keeper | `dupcopy\|3004822_610_20201205-204145.96` |
 
 Notes on the formats:
 - Times are the clock-offset-corrected capture times.
@@ -435,7 +438,7 @@ Every value below is a **starting point to be calibrated** in Milestone 2. They 
 | Overexposed | `clip_hi > A and p50 > B` | A = 0.05, B = 170 |
 | Underexposed | `(mean < C and p99 < D) or clip_lo > E` | C = 50, D = 180, E = 0.30 |
 | Exposure auto-reject (captures with a NEF) | `paired` and `nef_only` captures have raw headroom, so they're flagged for review only, except in extreme cases. `jpg_only` and `single` have no raw to recover from. | `clip_hi > 0.25` |
-| Blur | Burst-relative z-score of Laplacian variance / Tenengrad | z < −1.5 (proposed) |
+| Blur | Burst-relative z-score of Laplacian variance / Tenengrad. Bursts with fewer than 3 frames fall back to scene-level z-scores, then to global percentiles. | z < −1.5 (proposed) |
 | Missed focus | `sharpness(AF box) / sharpness(frame)` | < ~1.0 |
 | Exact duplicate copy | same file type + identical `ImageDataHash` (SHA-256 of image data) + matching capture metadata | exact match; no threshold |
 | Near-duplicate | pHash Hamming distance | ≤ 6–8 |
@@ -457,12 +460,10 @@ CREATE TABLE photos (
   nef_path    TEXT,
   jpg_path    TEXT,
   heic_path   TEXT,
-  xmp_path    TEXT,               -- NEF sidecar
   dto         TEXT,               -- DateTimeOriginal + SubSec, clock-offset corrected
   model       TEXT,
+  serial      TEXT,
   af_x REAL, af_y REAL, af_w REAL, af_h REAL,   -- AF box in JPG pixel space
-  sha256_nef  TEXT,
-  sha256_jpg  TEXT,
   folder      TEXT,               -- shared parent of the capture's files, format subfolders (Raw/JPG) ignored; scene hint only
   status      TEXT,               -- paired | nef_only | jpg_only | single
   quarantined INTEGER DEFAULT 0   -- 1 once Stage 7 has moved the capture's files
@@ -471,15 +472,18 @@ CREATE TABLE photos (
 
 -- Every file on disk, including duplicate copies.
 CREATE TABLE files (
-  path         TEXT PRIMARY KEY,
+  path         TEXT PRIMARY KEY,  -- relative to the scanned root, '/'-separated
   capture_id   TEXT,              -- capture this file belongs to
   kind         TEXT,              -- nef | jpg | heic | xmp
   size         INTEGER,
-  mtime        TEXT,
+  mtime_ns     INTEGER,           -- hashes are cleared when size or mtime change
   sha256       TEXT,              -- full-file hash (backup / move verification)
   image_hash   TEXT,              -- ImageDataHash: SHA-256 of image data, metadata excluded
   role         TEXT,              -- keeper | duplicate_copy | variant
-  duplicate_of TEXT               -- keeper path when role = duplicate_copy
+  duplicate_of TEXT,              -- keeper path when role = duplicate_copy
+  present      INTEGER,           -- 0 = in the manifest but missing on the last scan
+  first_seen   TEXT,
+  last_seen    TEXT
 );
 
 CREATE TABLE scores (
@@ -500,11 +504,13 @@ CREATE TABLE groups (
 
 CREATE TABLE decisions (
   capture_id TEXT,
+  source     TEXT,                -- machine | human
   decision   TEXT,                -- reject | pending | pick
   reason     TEXT,
-  source     TEXT,                -- machine | human
-  ts         TEXT
+  ts         TEXT,                -- time of the latest change
+  PRIMARY KEY (capture_id, source)
 );
+-- Effective decision = the human row if present, else the machine row.
 ```
 
 ---
@@ -517,7 +523,7 @@ CREATE TABLE decisions (
 PhotoOrganizer/
 ├── README.md
 ├── PLAN.md
-├── config.toml               # thresholds, library root, per-camera clock offsets
+├── config.toml               # thresholds, library root, per-camera clock offsets (lives in the project)
 ├── requirements.txt          # core (M1–M3, CPU)
 ├── requirements-gpu.txt      # M4 GPU extras
 ├── cli.py                    # entry point (subcommands below)
@@ -549,7 +555,8 @@ PhotoOrganizer/
 Planned commands:
 
 ```powershell
-python cli.py pair     D:\Photos\2024                 # scan + build/refresh manifest
+python cli.py scan     D:\Photos\2024                 # Stage 1: inventory files (new/changed/missing)
+python cli.py pair     D:\Photos\2024                 # Stage 2: hash, dedupe, pair
 python cli.py analyze  D:\Photos\2024 [--gpu]         # exposure, blur, focus (+ IQA)
 python cli.py group    D:\Photos\2024 [--gpu]         # bursts, scenes, dupes, clusters
 python cli.py flag     D:\Photos\2024 [--advisory]    # write XMP (advisory = pending only)
@@ -564,7 +571,9 @@ python cli.py check    D:\Photos\2024                 # untracked/missing files,
 
 ### Milestone 1: pairing, manifest and classical pass (advisory only)
 
-- [ ] `config.toml` + loader (library root, thresholds, clock offsets)
+- [ ] `config.toml` + loader (library root, thresholds, clock offsets). The config lives in the project. Each scanned root gets its own manifest at `<root>/.photoorganizer/manifest.sqlite`, so `sample_photos/` and the real library never share state.
+- [ ] `snapshot` command (Stage 0): write a manifest of every file under the root, with full sha256 and `ImageDataHash`, to `<root>/.photoorganizer/snapshots/<timestamp>.tsv`
+- [x] Stage 1 scan: recursive inventory into the `files` table (size, mtime, kind), the folder hint (format subfolders ignored), new/changed/missing detection between scans, and warnings for paths over 240 characters
 - [ ] `exif_io.py`: pyexiftool `stay_open` wrapper; batch read; XMP write for JPG, HEIC and the NEF sidecar
 - [ ] Verify the keyword field formats with a digiKam round-trip (write → reread in digiKam → write back → diff)
 - [ ] `manifest.py`: create the schema; upsert photos
@@ -660,4 +669,4 @@ python cli.py check    D:\Photos\2024                 # untracked/missing files,
 
 This is a personal hobby project built entirely on free tools: [exiftool](https://exiftool.org/), [digiKam](https://www.digikam.org/), [Krokiet/Czkawka](https://github.com/qarmin/czkawka), [OpenCV](https://opencv.org/), [pyiqa](https://github.com/chaofengc/IQA-PyTorch), [OpenCLIP](https://github.com/mlfoundations/open_clip), [DINOv2](https://github.com/facebookresearch/dinov2), [HDBSCAN](https://github.com/scikit-learn-contrib/hdbscan), [imagehash](https://github.com/JohannesBuchner/imagehash), [MediaPipe](https://developers.google.com/mediapipe), [rawpy/LibRaw](https://github.com/letmaik/rawpy), and [PyTorch](https://pytorch.org/).
 
-See [`PLAN.md`](PLAN.md) for the original design notes and rationale.
+[`PLAN.md`](PLAN.md) is a compact implementation summary of this README. If the two disagree, this README wins.
