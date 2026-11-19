@@ -1,0 +1,10 @@
+# Core dependencies: Milestones 1–3, CPU only.
+# Manual prerequisite: exiftool.exe on PATH (see README → Setup).
+numpy
+opencv-python
+pillow
+pillow-heif        # HEIC phone photos
+pyexiftool         # wraps exiftool in -stay_open mode
+imagehash          # M3: near-duplicate pHash
+rawpy              # optional fallback: decode the raw only when the NEF has no usable preview
+mediapipe          # M3: face fallback for missed-focus; M4: eyes-open check

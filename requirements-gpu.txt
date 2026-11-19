@@ -1,0 +1,8 @@
+# GPU extras: Milestone 4.
+# Install PyTorch FIRST from a CUDA >= 12.8 index (Blackwell sm_120), e.g.:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+# Use the newest cuXXX build offered that is <= the CUDA version shown by `nvidia-smi`.
+-r requirements.txt
+pyiqa              # topiq_nr quality score (+ optional aesthetic metrics)
+open_clip_torch    # CLIP embeddings (DINOv2 loads via torch.hub, no extra package)
+scikit-learn>=1.3  # sklearn.cluster.HDBSCAN
