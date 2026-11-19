@@ -28,6 +28,8 @@ class ScanConfig:
 class Config:
     library_root: Path | None = None
     scan: ScanConfig = field(default_factory=ScanConfig)
+    # Duplicate-copy keeper rule 4: folders (relative to the scanned root) preferred, in order.
+    preferred_roots: tuple[str, ...] = ()
 
 
 class ConfigError(ValueError):
@@ -85,4 +87,9 @@ def load(path: Path | str | None = None) -> Config:
         path_warn_length=warn_len,
         extensions=extensions,
     )
-    return Config(library_root=library_root, scan=scan)
+    d = data.get("dedupe", {})
+    roots = d.get("preferred_roots", [])
+    if not isinstance(roots, list) or not all(isinstance(r, str) for r in roots):
+        raise ConfigError("dedupe.preferred_roots must be a list of strings")
+    preferred = tuple(r.replace("\\", "/").strip("/") for r in roots)
+    return Config(library_root=library_root, scan=scan, preferred_roots=preferred)

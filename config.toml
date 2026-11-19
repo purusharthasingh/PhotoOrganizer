@@ -23,3 +23,9 @@ nef  = [".nef"]
 jpg  = [".jpg", ".jpeg"]
 heic = [".heic", ".heif"]
 xmp  = [".xmp"]
+
+[dedupe]
+# Keeper rule 4: when exact copies tie on the earlier rules, prefer copies under
+# these folders (relative to the scanned root), first match wins. Example:
+# preferred_roots = ["Photos", "Imports"]
+preferred_roots = []

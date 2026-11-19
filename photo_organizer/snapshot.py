@@ -76,15 +76,19 @@ class _Meter:
 # --------------------------------------------------------------------------- snapshot
 
 @dataclass
-class SnapshotResult:
-    scan: ScanResult
-    path: Path | None = None
-    files: int = 0
+class HashStats:
     hashed_sha: int = 0
     hashed_image: int = 0
     no_image_hash: list[str] = field(default_factory=list)   # picture files exiftool couldn't hash
     unstable: list[str] = field(default_factory=list)         # changed while being hashed
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SnapshotResult(HashStats):
+    scan: ScanResult | None = None
+    path: Path | None = None
+    files: int = 0
 
 
 def _stat_matches(full: Path, size: int, mtime_ns: int) -> bool:
@@ -96,14 +100,16 @@ def _stat_matches(full: Path, size: int, mtime_ns: int) -> bool:
 
 
 def fill_hashes(root: Path, conn: sqlite3.Connection, exif: Exif, out: Progress,
-                result: SnapshotResult) -> None:
+                result: HashStats | None = None, *, sha: bool = True,
+                image: bool = True) -> HashStats:
     """Compute missing sha256 / image_hash values in `files`. Cached ones are reused:
     Stage 1 clears them whenever a file's size or mtime changes."""
+    result = result if result is not None else HashStats()
     rows = conn.execute(
         "SELECT path, kind, size, mtime_ns, sha256, image_hash FROM files WHERE present=1"
         " ORDER BY path").fetchall()
 
-    need_sha = [r for r in rows if r["sha256"] is None]
+    need_sha = [r for r in rows if r["sha256"] is None] if sha else []
     if need_sha:
         meter = _Meter("sha256", len(need_sha), sum(r["size"] for r in need_sha), out)
         for r in need_sha:
@@ -122,7 +128,8 @@ def fill_hashes(root: Path, conn: sqlite3.Connection, exif: Exif, out: Progress,
             result.hashed_sha += 1
         meter.done()
 
-    need_img = [r for r in rows if r["kind"] in PICTURE_KINDS and r["image_hash"] is None]
+    need_img = [r for r in rows
+                if r["kind"] in PICTURE_KINDS and r["image_hash"] is None] if image else []
     if need_img:
         meter = _Meter("image hash", len(need_img), sum(r["size"] for r in need_img), out)
         for i in range(0, len(need_img), EXIF_BATCH):
@@ -147,6 +154,7 @@ def fill_hashes(root: Path, conn: sqlite3.Connection, exif: Exif, out: Progress,
     result.no_image_hash = [
         r["path"] for r in conn.execute(
             "SELECT path FROM files WHERE present=1 AND image_hash='' ORDER BY path")]
+    return result
 
 
 def snapshot_dir(root: Path) -> Path:

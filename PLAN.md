@@ -65,12 +65,12 @@
    - An *exact copy* has the same file type and the same `ImageDataHash`, and its capture metadata (DTO, SubSec, Serial, ShutterCount) matches where present.
    - A *variant* has the same capture metadata but different image data. Variants are reported, never marked.
    - Keeper rules, applied in order until one copy wins:
-     1. Human decisions in XMP. If two copies carry *different* human decisions, this is a conflict: report it and mark nothing.
+     1. Human decisions in XMP. If two copies carry *different* human decisions, this is a conflict: report it and mark nothing. The best-ranked copy stands in as keeper; the others get role `conflict`.
      2. A paired copy beats a lone copy.
      3. The copy in the fuller folder.
      4. Preferred roots from `config.toml`.
      5. The oldest mtime, then the shortest path.
-   - Non-keepers get role `duplicate_copy` and the keyword `dupcopy|<keeper capture_id>`, with decision reject/`duplicate_copy`. In advisory mode the decision is pending instead.
+   - Stage 2 records non-keepers as role `duplicate_copy` + `duplicate_of` in `files` (manifest only; no file is touched). Stage 5 labels each copy's own file with reject/`duplicate_copy` + `dupcopy|<keeper capture_id>` (pending in advisory mode). Copies share the keeper's capture_id, so this per-file label is not a `decisions` row.
    - If a duplicate carries metadata the keeper lacks, report it. Never merge metadata.
    - A folder whose every capture is an exact copy of a capture kept elsewhere is reported as a *duplicate folder*. Partial overlaps are reported with a percentage.
    - Duplicate copies never take part in pairing or analysis. They attach to the keeper's capture.
@@ -78,7 +78,7 @@
    **2b. Pairing** (keepers only)
    1. Index NEF/JPG files by stem (case-insensitive) across the whole scanned root. A partner can be in the same folder, a sibling folder or a subfolder.
    2. Confirm a pair only if DTO, SubSec, ShutterCount and SerialNumber all match. A field missing from both files is ignored. (ShutterCount is not the file number: in `Cheesecake/`, `DSC_0614` has ShutterCount 610.)
-   3. If several files confirm, choose the nearest in the folder tree (same folder, then sibling/subfolder, then elsewhere). Report the others. Never pair silently.
+   3. If several files confirm, choose the nearest in the folder tree (same folder, then sibling/subfolder, then elsewhere). Report the others as role `variant` (attached to the capture, never analyzed or labeled). Never pair silently.
    4. If the stem matches but the capture data doesn't, these are separate captures. `check` reports them as a name collision, which is not an error.
    5. Statuses: `paired` (NEF + JPG), `nef_only` (analyzed from the embedded preview), `jpg_only`, `single` (phone HEIC/JPEG). A missing partner is normal, not an error. A JPG is a camera JPG if it has a `ShutterCount` or a Nikon `Make`. Any other JPG, and every HEIC, is `single`.
    6. `capture_id`:
@@ -98,7 +98,7 @@
      - M1 uses global stats only, until bursts exist (M3).
      - Detect shake with FFT or gradient anisotropy, since motion blur is directional.
    - **Missed focus:**
-     - If `AFCoordinatesAvailable`: map the AF box to JPG pixels (scaling and orientation), then compute `focus_ratio = sharpness(AF box) / sharpness(frame)`. A ratio below about 1 suggests missed focus.
+     - AF area source, in order: (1) pixel coordinates when `AFCoordinatesAvailable` = Yes (live view); (2) named viewfinder points when it is No (phase detect, as on every current sample photo): `PrimaryAFPoint` / `AFPointsUsed` on the `FocusPointSchema` grid (D780: `51-point`, rows A–E x columns 1–11, C6 = centre), mapped by a per-schema table to approximate frame boxes; (3) the fallback below. Map the AF box to JPG pixels (scaling and orientation), then compute `focus_ratio = sharpness(AF box) / sharpness(frame)`. A ratio below about 1 suggests missed focus.
      - Validate first by drawing AF boxes on 20 images (`tools/draw_af_boxes.py`).
      - Fallback: mediapipe face/object detection, then sharpness inside the detected region.
    - **Learned quality (GPU, M4):** pyiqa `topiq_nr` in fp16, batches of 32–128.
@@ -120,9 +120,9 @@
      |---|---|---|
      | Burst | `<YYYYMMDD-HHMMSS.ss first frame>-<model, no spaces>` | `burst\|20201205-204145.96-D780` |
      | Scene | `<YYYYMMDD-HHMM first frame>-<folder slug>` | `scene\|20251029-1139-puerto-rico-26` |
-     | Near-dup set | `capture_id` of earliest member | `dup\|3004822_610_20201205-204145.96` |
+     | Near-dup set | `capture_id` of earliest member | `dup\|3004822_614_20201205-204145.96` |
      | Subject | `<scene_id>/<n>`, n ordered by each cluster's earliest frame | `subject\|20251029-1139-puerto-rico-26/2` |
-     | Duplicate copy | keeper's `capture_id` | `dupcopy\|3004822_610_20201205-204145.96` |
+     | Duplicate copy | keeper's `capture_id` | `dupcopy\|3004822_614_20201205-204145.96` |
 
      - Folder slug: lowercase, with spaces and punctuation replaced by `-`.
      - If two IDs ever collide, add a suffix `-b`, `-c`.
@@ -180,11 +180,19 @@ CREATE TABLE files (                -- every file on disk, incl. duplicate copie
   mtime_ns     INTEGER,             -- hashes are cleared when size or mtime change
   sha256       TEXT,                -- full-file hash (backup / move verification)
   image_hash   TEXT,                -- ImageDataHash (identity, dedupe)
-  role         TEXT,                -- keeper | duplicate_copy | variant
+  role         TEXT,                -- keeper | duplicate_copy | conflict | variant (NULL for sidecars)
   duplicate_of TEXT,                -- keeper path when role = duplicate_copy
   present      INTEGER,             -- 0 = missing on the last scan
   first_seen   TEXT,
   last_seen    TEXT
+);
+
+-- Cached exiftool metadata (capture fields + XMP decisions), valid while size/mtime match.
+CREATE TABLE file_meta (
+  path     TEXT PRIMARY KEY,
+  size     INTEGER,
+  mtime_ns INTEGER,
+  data     TEXT                     -- exiftool JSON row
 );
 
 CREATE TABLE scores (

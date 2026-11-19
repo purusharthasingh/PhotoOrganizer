@@ -13,8 +13,8 @@ from pathlib import Path
 import exiftool
 from exiftool.exceptions import ExifToolException
 
-# -n: numeric values. -charset filename=utf8: non-ASCII paths on Windows.
-COMMON_ARGS = ["-n", "-charset", "filename=utf8"]
+# -charset filename=utf8: non-ASCII paths on Windows. Numeric (-n) output is chosen per call.
+COMMON_ARGS = ["-charset", "filename=utf8"]
 HASH_ARGS = ["-api", "ImageHashType=SHA256"]
 
 
@@ -45,29 +45,36 @@ class Exif:
         if self._et.running:
             self._et.terminate()
 
+    def _rows(self, keys: list[str], tags: list[str], params: list[str]) -> dict[str, dict]:
+        """{resolved posix path: exiftool row}. Unreadable files are left out."""
+        if not keys:
+            return {}
+        try:
+            rows = self._et.get_tags(keys, tags, params=params)
+        except ExifToolException:
+            # One bad file can fail a whole batch; fall back to one file at a time.
+            if len(keys) == 1:
+                return {}
+            out: dict[str, dict] = {}
+            for k in keys:
+                out.update(self._rows([k], tags, params))
+            return out
+        return {_key(r["SourceFile"]): r for r in rows if "SourceFile" in r}
+
     def image_data_hashes(self, paths: list[Path | str]) -> dict[str, str]:
         """SHA-256 of each file's image data, metadata excluded (exiftool ImageDataHash).
 
         Returns {resolved posix path: hex hash or ''}. '' means exiftool read the
         file but could not hash its image data. Unreadable files are left out.
         """
-        if not paths:
-            return {}
-        keys = [_key(p) for p in paths]
-        try:
-            rows = self._et.get_tags(keys, ["ImageDataHash"], params=HASH_ARGS)
-        except ExifToolException:
-            # One bad file can fail a whole batch; fall back to one file at a time.
-            if len(keys) == 1:
-                return {}
-            out: dict[str, str] = {}
-            for k in keys:
-                out.update(self.image_data_hashes([k]))
-            return out
-        out = {}
-        for row in rows:
-            src = row.get("SourceFile")
-            if src is None:
-                continue
-            out[_key(src)] = str(row.get("ImageDataHash") or row.get("File:ImageDataHash") or "")
-        return out
+        rows = self._rows([_key(p) for p in paths], ["ImageDataHash"], HASH_ARGS)
+        return {k: str(r.get("ImageDataHash") or "") for k, r in rows.items()}
+
+    def read_tags(self, paths: list[Path | str], tags: list[str],
+                  numeric: bool = True) -> dict[str, dict]:
+        """Read the given tags. Returns {resolved posix path: {tag: value}}, keys
+        without group prefixes (so request XMP tags by group to disambiguate).
+
+        numeric=True gives raw values (-n); False gives exiftool's readable form,
+        e.g. PrimaryAFPoint 'C6 (Center)' instead of 1."""
+        return self._rows([_key(p) for p in paths], tags, ["-n"] if numeric else [])

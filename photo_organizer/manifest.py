@@ -11,7 +11,7 @@ from pathlib import Path
 
 STATE_DIRNAME = ".photoorganizer"
 DB_FILENAME = "manifest.sqlite"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS photos (
@@ -58,6 +58,14 @@ CREATE TABLE IF NOT EXISTS groups (
   scene_id   TEXT,
   dup_id     TEXT,
   subject_id TEXT
+);
+
+-- Cached exiftool metadata per file (v2). Valid while size/mtime_ns match `files`.
+CREATE TABLE IF NOT EXISTS file_meta (
+  path     TEXT PRIMARY KEY,
+  size     INTEGER NOT NULL,
+  mtime_ns INTEGER NOT NULL,
+  data     TEXT NOT NULL              -- exiftool JSON row
 );
 
 CREATE TABLE IF NOT EXISTS decisions (

@@ -130,6 +130,79 @@ def cmd_verify(args) -> int:
     return 1 if res.problems else 0
 
 
+def cmd_pair(args) -> int:
+    from collections import Counter
+
+    from photo_organizer.exif_io import Exif
+    from photo_organizer.pair import run_pair
+
+    cfg = config_mod.load(args.config)
+    root = _root(args, cfg)
+    conn = manifest.connect(root)
+    try:
+        with Exif() as exif:
+            res = run_pair(root, cfg, conn, exif)
+    finally:
+        conn.close()
+    limit = 10**9 if args.verbose else 10
+    s = res.scan
+    print(f"Scanned {s.root}: {len(s.files)} files"
+          f" (new {len(s.new)}, changed {len(s.changed)}, missing {len(s.missing)})")
+
+    statuses = Counter(c.status for c in res.captures)
+    print(f"\nCaptures: {len(res.captures)}  ("
+          + ", ".join(f"{statuses[k]} {k}" for k in ("paired", "nef_only", "jpg_only", "single")
+                      if statuses[k]) + ")")
+    by_folder: dict[str, Counter] = {}
+    from photo_organizer.scan import shared_folder
+    for c in res.captures:
+        folder = shared_folder([f.path for f in c.files], cfg.scan.format_subfolders) or "."
+        by_folder.setdefault(folder, Counter())[c.status] += 1
+    for folder in sorted(by_folder):
+        cnt = by_folder[folder]
+        print(f"  {folder}: " + ", ".join(f"{n} {k}" for k, n in sorted(cnt.items())))
+    if args.verbose:
+        for c in sorted(res.captures, key=lambda c: c.lead.path):
+            print(f"    {c.capture_id:40s} {c.status:9s} " + " + ".join(f.path for f in c.files))
+
+    dd = res.dedupe
+    n_dups = sum(len(g.copies) for g in dd.groups)
+    print(f"\nDuplicate copies: {n_dups} file(s) in {len(dd.groups)} group(s)"
+          " (marked in the manifest only; nothing is moved)")
+    for g in dd.groups[:limit]:
+        print(f"  keep {g.keeper.path}   [{g.reason}]")
+        for c in g.copies:
+            print(f"     copy {c.path}")
+    if len(dd.groups) > limit:
+        print(f"  ... and {len(dd.groups) - limit} more groups (use --verbose)")
+    for folder, n, total, keeper_folders in res.folders:
+        where = ", ".join(f"{k or '.'} ({m})" for k, m in keeper_folders)
+        if n == total:
+            print(f"  DUPLICATE FOLDER: {folder} (100%, all {total} files kept in: {where})")
+        else:
+            print(f"  Partial overlap: {folder} is {100 * n // total}% duplicates"
+                  f" ({n}/{total}) of: {where}")
+
+    _print_list("CONFLICTS: copies with different human decisions (none marked)",
+                [" vs ".join(f"{f.path} [{f.decision.describe()}]" for f in c.files)
+                 for c in dd.conflicts], limit)
+    _print_list("Duplicates carrying metadata the keeper lacks (not merged)",
+                [f"{p}: {what}" for p, what in sorted(dd.extra_metadata.items())], limit)
+    _print_list("Same picture data but different capture data (not treated as copies)",
+                [" = ".join(g) for g in dd.odd_matches], limit)
+    _print_list("Variants (same capture data, different picture; attached, not marked)",
+                [f"{p} -> {cid}" for p, cid in sorted(res.variants.items())], limit)
+    _print_list("Name collisions (same name, different shot; kept as separate captures)",
+                [" / ".join(g) for g in res.collisions], limit)
+    _print_list("Same name but no capture data to confirm a pair",
+                [" / ".join(g) for g in res.unconfirmed], limit)
+    _print_list("Fallback capture IDs (missing serial/shutter count/subsec)", res.fallback_ids, limit)
+    _print_list("Capture IDs given a suffix to stay unique", res.suffixed_ids, limit)
+    _print_list("ERRORS (unreadable)", res.unreadable + s.errors, limit)
+    print(f"\nManifest: {manifest.db_path(root)}")
+    return 1 if (res.unreadable or s.errors) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cli.py", description="PhotoOrganizer culling pipeline")
     parser.add_argument("--config", help="path to config.toml (default: the project's)")
@@ -151,6 +224,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--against", help="folder to check instead of the root, e.g. a backup copy")
     p.add_argument("-v", "--verbose", action="store_true")
     p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("pair", help="Stage 2: find duplicate copies and pair NEF+JPG (read-only)")
+    p.add_argument("root", nargs="?", help="folder (default: [library] root in config.toml)")
+    p.add_argument("-v", "--verbose", action="store_true", help="list every capture")
+    p.set_defaults(func=cmd_pair)
 
     args = parser.parse_args(argv)
     try:

@@ -261,7 +261,7 @@ exiftool -r -json -n -ext NEF -ext JPG -ext JPEG -ext HEIC `
 1. **Index by stem.** Build a map from stem to every NEF/JPG with that stem anywhere under the scanned root.
 2. **Confirm by capture data.** A NEF and a JPG with the same stem are paired only if `DateTimeOriginal`, `SubSecTimeOriginal`, `ShutterCount` and `SerialNumber` all match. Ignore any field that's missing from both files.
    - ShutterCount is not the file number. In `sample_photos/Cheesecake/`, `DSC_0614` has ShutterCount 610.
-3. **Choose the nearest match.** Pairing runs on keeper copies only (see [Duplicate copies](#duplicate-copies)). If several files still confirm, for example *variants* with the same capture data, pair with the one closest in the folder tree: same folder, then sibling or subfolder, then anything else. Report the rest. Never pair them silently.
+3. **Choose the nearest match.** Pairing runs on keeper copies only (see [Duplicate copies](#duplicate-copies)). If several files still confirm, for example *variants* with the same capture data, pair with the one closest in the folder tree: same folder, then sibling or subfolder, then anything else. Report the rest. Never pair them silently. The rest get role `variant`: they are attached to that capture but never analyzed or labeled.
 4. **Same name, different shot.** If the stem matches but the capture data doesn't, the files are **not** paired. Each becomes its own capture, and `check` reports it as a name collision. It isn't treated as a problem with either file.
 5. **Statuses:**
 
@@ -298,7 +298,7 @@ Hashing only the image data means a copy still matches after its metadata change
 
 **Choosing the keeper.** Rules are applied in order until one copy wins:
 
-1. **Human decisions.** Keep the copy whose XMP or sidecar has ratings, pick labels or tags you set. If two copies carry *different* human decisions, it's a **conflict**: nothing is marked, and the case is reported for you to resolve.
+1. **Human decisions.** Keep the copy whose XMP or sidecar has ratings, pick labels or tags you set. If two copies carry *different* human decisions, it's a **conflict**: nothing is marked, and the case is reported for you to resolve. Until then the best-ranked copy stands in as the keeper for pairing and analysis, and the others get role `conflict`.
 2. **Paired beats lone.** Keep the copy whose partner sits next to it. For a NEF, that's the copy beside its JPG.
 3. **Fuller folder.** Keep the copy in the folder that holds more of that event's captures, rather than a stray copy.
 4. **Preferred roots** (optional, in `config.toml`). For example, prefer `D:\Photos` over `D:\Imports`.
@@ -306,7 +306,8 @@ Hashing only the image data means a copy still matches after its metadata change
 
 **Marking duplicates.**
 - The keeper is unchanged.
-- Each duplicate copy gets the decision `reject` with the reason `duplicate_copy` and the keyword `dupcopy|<keeper capture_id>`. In advisory mode (Milestones 1–4) it gets `pending` instead.
+- Stage 2 only records the role `duplicate_copy` (and `duplicate_of`) in the manifest's `files` table. It never moves, renames or writes to any file.
+- Stage 5 then labels each duplicate copy's own file: decision `reject` with reason `duplicate_copy` and the keyword `dupcopy|<keeper capture_id>`, or `pending` in advisory mode (Milestones 1–4). A copy shares the keeper's `capture_id`, so this per-file label is not stored in the `decisions` table.
 - Exact copies are one of the few cases that can be auto-rejected in Milestone 5, because the image data is provably identical and the keeper is verified to exist.
 - If a duplicate carries metadata the keeper lacks (keywords, GPS, rating), the report says so. Nothing is merged automatically.
 
@@ -329,7 +330,12 @@ Results are cached in SQLite, keyed by `(capture_id, metric, model_version)`. Re
   - Score each frame **relative to its burst** (z-scores), never against a single global threshold.
   - Detect shake with FFT or gradient anisotropy: motion blur is directional.
 - **Missed focus:**
-  - If `AFCoordinatesAvailable`:
+  - Where the AF area comes from, in order:
+    1. **Pixel coordinates** (`AFCoordinatesAvailable` = Yes; live view / contrast-detect): `AFAreaXPosition/YPosition/Width/Height`.
+    2. **Named viewfinder points** (`AFCoordinatesAvailable` = No, `AFDetectionMethod` = Phase Detect). This is every photo in the current `sample_photos/` set. The camera records `PrimaryAFPoint` (e.g. `C6 (Center)`) and `AFPointsUsed` (e.g. `B5,C5,C6`) on the grid named by `FocusPointSchema` (`51-point` on the D780: rows A–E, columns 1–11, C6 = centre). A per-schema table maps each point to an approximate box in the frame. Use the primary point, or the bounding box of the points used.
+    3. Otherwise, the face/object fallback below.
+  - `FocusDistance` is recorded too and can serve as an extra signal.
+  - With an AF box from 1 or 2:
     1. Scale the AF-area box to the JPG's dimensions and correct it for orientation.
     2. Compute `focus_ratio = sharpness(AF box) / sharpness(whole frame)`.
     3. A ratio below about 1 suggests missed focus.
@@ -359,9 +365,9 @@ Group IDs are written into XMP keywords, so they must be **stable across re-runs
 |---|---|---|
 | Burst (per camera) | `<YYYYMMDD-HHMMSS.ss of first frame>-<camera model>` | `burst\|20201205-204145.96-D780` |
 | Scene | `<YYYYMMDD-HHMM of first frame>-<folder slug>` | `scene\|20251029-1139-puerto-rico-26` |
-| Near-duplicate set | `capture_id` of the earliest member | `dup\|3004822_610_20201205-204145.96` |
+| Near-duplicate set | `capture_id` of the earliest member | `dup\|3004822_614_20201205-204145.96` |
 | Subject cluster | `<scene_id>/<n>`, with `n` numbered by each cluster's earliest frame (HDBSCAN labels themselves are arbitrary) | `subject\|20251029-1139-puerto-rico-26/2` |
-| Duplicate copy | `capture_id` of the keeper | `dupcopy\|3004822_610_20201205-204145.96` |
+| Duplicate copy | `capture_id` of the keeper | `dupcopy\|3004822_614_20201205-204145.96` |
 
 Notes on the formats:
 - Times are the clock-offset-corrected capture times.
@@ -494,11 +500,19 @@ CREATE TABLE files (
   mtime_ns     INTEGER,           -- hashes are cleared when size or mtime change
   sha256       TEXT,              -- full-file hash (backup / move verification)
   image_hash   TEXT,              -- ImageDataHash: SHA-256 of image data, metadata excluded
-  role         TEXT,              -- keeper | duplicate_copy | variant
+  role         TEXT,              -- keeper | duplicate_copy | conflict | variant (NULL for sidecars)
   duplicate_of TEXT,              -- keeper path when role = duplicate_copy
   present      INTEGER,           -- 0 = in the manifest but missing on the last scan
   first_seen   TEXT,
   last_seen    TEXT
+);
+
+-- Cached exiftool metadata (capture fields + XMP decisions), valid while size/mtime match.
+CREATE TABLE file_meta (
+  path     TEXT PRIMARY KEY,
+  size     INTEGER,
+  mtime_ns INTEGER,
+  data     TEXT                     -- exiftool JSON row
 );
 
 CREATE TABLE scores (
@@ -592,11 +606,12 @@ python cli.py check    D:\Photos\2024                 # untracked/missing files,
 - [x] `snapshot` command (Stage 0): write a manifest of every file under the root, with full sha256 and `ImageDataHash`, to `<root>/.photoorganizer/snapshots/<timestamp>.tsv`
 - [x] `verify` command (Stage 0): check the library or a backup copy against a snapshot
 - [x] Stage 1 scan: recursive inventory into the `files` table (size, mtime, kind), the folder hint (format subfolders ignored), new/changed/missing detection between scans, and warnings for paths over 240 characters
-- [ ] `exif_io.py`: pyexiftool `stay_open` wrapper; batch read; XMP write for JPG, HEIC and the NEF sidecar
+- [x] `exif_io.py`: pyexiftool `stay_open` wrapper; batch read
+- [ ] `exif_io.py`: XMP write for JPG, HEIC and the NEF sidecar (Stage 5)
 - [ ] Verify the keyword field formats with a digiKam round-trip (write → reread in digiKam → write back → diff)
-- [ ] `manifest.py`: create the schema; upsert photos
-- [ ] `pair.py`: recursive scan; stem index across folders (same, sibling and subfolder); confirm on DTO/SubSec/ShutterCount/Serial; nearest-match tie-break; `paired` / `nef_only` / `jpg_only` / `single` statuses; collision report; stable `capture_id` across re-scans
-- [ ] `dedupe.py`: ImageDataHash (SHA-256, metadata excluded) cached by path/size/mtime; exact-copy groups; keeper rules (human decisions → paired → fuller folder → preferred roots → oldest/shortest); conflict report; duplicate-folder and overlap report; mark copies `duplicate_copy` (pending in advisory mode)
+- [x] `manifest.py`: create the schema; upsert photos
+- [x] `pair.py`: recursive scan; stem index across folders (same, sibling and subfolder); confirm on DTO/SubSec/ShutterCount/Serial; nearest-match tie-break; `paired` / `nef_only` / `jpg_only` / `single` statuses; collision report; stable `capture_id` across re-scans
+- [x] `dedupe.py`: ImageDataHash (SHA-256, metadata excluded) cached by path/size/mtime; exact-copy groups; keeper rules (human decisions → paired → fuller folder → preferred roots → oldest/shortest); conflict report; duplicate-folder and overlap report; mark copies `duplicate_copy` (pending in advisory mode)
 - [ ] Pairing test cases in `sample_photos/`. Expected results for the current set:
   - `Birb`, `Cheesecake`, `Spring Musings`: 14 captures, all `paired` in the same folder
   - `Cheesecake/Also Cheesecake`: `DSC_0618`–`0620` (NEF + JPG) have the same image data as the copies in `Cheesecake/`. All 6 files are `duplicate_copy`, the keepers stay in `Cheesecake/` (the fuller folder), and the folder is reported as a 100% duplicate folder.
