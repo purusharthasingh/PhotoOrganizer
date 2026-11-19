@@ -198,7 +198,22 @@ The setting only helps programs that support long paths, such as Python. Some to
 ### Stage 0 — Backup
 
 - Follow the 3-2-1 rule: 3 copies, on 2 kinds of media, with 1 offsite. **Do this before running anything else.**
-- Generate a manifest of every file in the library, recording both the full sha256 and the `ImageDataHash`. Later stages and the cleanup verification compare against it. Once the pipeline writes embedded XMP into a JPG/HEIC, that file's full sha256 changes by design, so JPG/HEIC integrity is checked by `ImageDataHash`.
+- Take a **snapshot**: `python cli.py snapshot <root>`. It scans the root and writes `<root>/.photoorganizer/snapshots/<UTC time>.tsv`, with one line per file: `path, kind, size, mtime_ns, sha256, image_hash`.
+  - `sha256` covers the whole file. `image_hash` is exiftool's `ImageDataHash` (SHA-256 of the picture data only), so it stays the same when labels are written into a JPG/HEIC.
+  - Fingerprints are cached in the manifest, so later snapshots only re-read files whose size or mtime changed.
+- **Verify** with `python cli.py verify <root>` (checks the library), or add `--against E:\Backup\Photos` to check a backup copy. It re-reads every file and reports:
+
+  | Result | Meaning | Problem? |
+  |---|---|---|
+  | ok | whole file identical | no |
+  | labels only | JPG/HEIC metadata changed, picture identical (e.g. pipeline or digiKam labels) | no |
+  | sidecar edited | `.xmp` changed | no |
+  | **changed** | picture data differs, or a NEF changed at all | **yes** |
+  | **missing** | in the snapshot, not on disk | **yes** |
+  | **unreadable** | could not be read | **yes** |
+  | extra | on disk, not in the snapshot | no (reported) |
+
+  It exits with code 1 if there are any problems. Take a fresh snapshot before each pipeline stage that writes files, and verify your backup against it.
 
 ### Stage 1 — Scan (any folder layout)
 
@@ -555,6 +570,8 @@ PhotoOrganizer/
 Planned commands:
 
 ```powershell
+python cli.py snapshot D:\Photos\2024                 # Stage 0: fingerprint every file
+python cli.py verify   D:\Photos\2024 [--against E:\Backup] # Stage 0: check library or backup
 python cli.py scan     D:\Photos\2024                 # Stage 1: inventory files (new/changed/missing)
 python cli.py pair     D:\Photos\2024                 # Stage 2: hash, dedupe, pair
 python cli.py analyze  D:\Photos\2024 [--gpu]         # exposure, blur, focus (+ IQA)
@@ -572,7 +589,8 @@ python cli.py check    D:\Photos\2024                 # untracked/missing files,
 ### Milestone 1: pairing, manifest and classical pass (advisory only)
 
 - [ ] `config.toml` + loader (library root, thresholds, clock offsets). The config lives in the project. Each scanned root gets its own manifest at `<root>/.photoorganizer/manifest.sqlite`, so `sample_photos/` and the real library never share state.
-- [ ] `snapshot` command (Stage 0): write a manifest of every file under the root, with full sha256 and `ImageDataHash`, to `<root>/.photoorganizer/snapshots/<timestamp>.tsv`
+- [x] `snapshot` command (Stage 0): write a manifest of every file under the root, with full sha256 and `ImageDataHash`, to `<root>/.photoorganizer/snapshots/<timestamp>.tsv`
+- [x] `verify` command (Stage 0): check the library or a backup copy against a snapshot
 - [x] Stage 1 scan: recursive inventory into the `files` table (size, mtime, kind), the folder hint (format subfolders ignored), new/changed/missing detection between scans, and warnings for paths over 240 characters
 - [ ] `exif_io.py`: pyexiftool `stay_open` wrapper; batch read; XMP write for JPG, HEIC and the NEF sidecar
 - [ ] Verify the keyword field formats with a digiKam round-trip (write → reread in digiKam → write back → diff)

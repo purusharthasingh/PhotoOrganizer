@@ -217,7 +217,7 @@ CREATE TABLE decisions (
 ## Project layout and CLI
 
 ```
-cli.py                       # scan | pair | analyze | group | flag | sync | cleanup | restore | check
+cli.py                       # snapshot | verify | scan | pair | analyze | group | flag | sync | cleanup | restore | check
 config.toml                  # in the project: library root, thresholds, clock offsets, format-subfolder names, preferred roots
 <root>/.photoorganizer/      # per scanned root: manifest.sqlite, snapshots/<timestamp>.tsv
 photo_organizer/
@@ -233,7 +233,7 @@ tests/
 
 1. **M1: pairing, manifest and classical pass (advisory only)**
    - `config.toml` + loader.
-   - `snapshot` (Stage 0 manifest: full sha256 + `ImageDataHash` per file).
+   - `snapshot` (Stage 0 manifest: full sha256 + `ImageDataHash` per file) and `verify` (library or backup vs a snapshot: ok / labels only / sidecar edited / changed / missing / unreadable / extra).
    - Stage 1 `scan`: inventory into `files`, folder hint, new/changed/missing detection, path-length warnings.
    - `exif_io` (stay_open; batch read; XMP write to JPG/HEIC/NEF sidecar), plus a digiKam keyword round-trip test.
    - `manifest`, `dedupe`, `pair`.
