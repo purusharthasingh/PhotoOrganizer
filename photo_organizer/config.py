@@ -11,6 +11,20 @@ DEFAULT_CONFIG_PATH = PROJECT_DIR / "config.toml"
 
 KINDS = ("nef", "jpg", "heic", "xmp")
 
+# README: Default thresholds. Starting points, calibrated in Milestone 2.
+DEFAULT_THRESHOLDS = {
+    "exposure": {
+        "over_clip_hi": 0.05, "over_p50": 170.0,
+        "under_mean": 50.0, "under_p99": 180.0, "under_clip_lo": 0.30,
+        "extreme_clip_hi": 0.25,
+    },
+    "blur": {
+        "z": -1.5,            # flag when combined sharpness z-score is below this
+        "min_group": 3,       # fewer frames than this: no relative judgement
+        "min_p99": 20.0,      # frames darker than this (near-black) have no detail to judge
+    },
+}
+
 
 @dataclass(frozen=True)
 class ScanConfig:
@@ -30,6 +44,9 @@ class Config:
     scan: ScanConfig = field(default_factory=ScanConfig)
     # Duplicate-copy keeper rule 4: folders (relative to the scanned root) preferred, in order.
     preferred_roots: tuple[str, ...] = ()
+    # Stage 3 thresholds, {section: {name: value}}; see DEFAULT_THRESHOLDS.
+    thresholds: dict = field(default_factory=lambda: {k: dict(v) for k, v in DEFAULT_THRESHOLDS.items()})
+    analysis_long_edge: int = 2048
 
 
 class ConfigError(ValueError):
@@ -92,4 +109,22 @@ def load(path: Path | str | None = None) -> Config:
     if not isinstance(roots, list) or not all(isinstance(r, str) for r in roots):
         raise ConfigError("dedupe.preferred_roots must be a list of strings")
     preferred = tuple(r.replace("\\", "/").strip("/") for r in roots)
-    return Config(library_root=library_root, scan=scan, preferred_roots=preferred)
+
+    thresholds = {k: dict(v) for k, v in DEFAULT_THRESHOLDS.items()}
+    for section, values in data.get("thresholds", {}).items():
+        if section not in thresholds or not isinstance(values, dict):
+            raise ConfigError(f"thresholds: unknown section {section!r}")
+        for name, value in values.items():
+            if name not in thresholds[section]:
+                raise ConfigError(f"thresholds.{section}: unknown setting {name!r}")
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ConfigError(f"thresholds.{section}.{name} must be a number")
+            thresholds[section][name] = float(value)
+
+    a = data.get("analysis", {})
+    long_edge = a.get("long_edge", 2048)
+    if not isinstance(long_edge, int) or long_edge < 256:
+        raise ConfigError("analysis.long_edge must be an integer >= 256")
+
+    return Config(library_root=library_root, scan=scan, preferred_roots=preferred,
+                  thresholds=thresholds, analysis_long_edge=long_edge)

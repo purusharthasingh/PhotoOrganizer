@@ -29,3 +29,23 @@ xmp  = [".xmp"]
 # these folders (relative to the scanned root), first match wins. Example:
 # preferred_roots = ["Photos", "Imports"]
 preferred_roots = []
+
+[analysis]
+# Previews are scaled so their long edge is at most this many pixels.
+long_edge = 2048
+
+# Stage 3 thresholds: starting points, to be calibrated in Milestone 2.
+# Luminance Y is on 0-255; clip_hi = share of pixels >= 250, clip_lo = share <= 5.
+[thresholds.exposure]
+over_clip_hi    = 0.05   # overexposed: clip_hi above this ...
+over_p50        = 170    # ... and median brighter than this
+under_mean      = 50     # underexposed: mean below this and p99 below under_p99,
+under_p99       = 180
+under_clip_lo   = 0.30   # ... or more than this share of near-black pixels
+extreme_clip_hi = 0.25   # extreme overexposure (auto-reject candidate in Milestone 5)
+
+[thresholds.blur]
+z         = -1.5         # flag when sharpness z-score (vs other frames) is below this
+min_group = 3            # need at least this many frames to compare
+min_p99   = 20           # near-black frames (p99 below this) get no blur verdict and are
+                         # left out of the comparison, so they don't skew it

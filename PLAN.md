@@ -92,7 +92,7 @@
      - Overexposed: `clip_hi > 0.05 and p50 > 170`.
      - Underexposed: `(mean < 50 and p99 < 180) or clip_lo > 0.30`.
      - Captures with a NEF (`paired`/`nef_only`) have raw headroom, so they are flagged for review only. Auto-reject applies only in extreme cases (`clip_hi > 0.25`).
-   - **Blur and shake (CPU):** resize to about 2048 px on the long edge, then compute Laplacian variance and Tenengrad.
+   - **Blur and shake (CPU):** resize to about 2048 px on the long edge, then compute Laplacian variance and Tenengrad, and both divided by luminance variance (`lap_norm`, `ten_norm`). Judge on the normalised values (z of log, mean of both), so dark-but-sharp frames aren't called blurry. Near-black frames (p99 < 20) get no blur verdict and are left out of the comparison. Whole-frame scores can't tell bokeh from a miss; the AF-point check (M3) fixes that.
      - Score relative to the burst with z-scores (flag at z < −1.5) **only when the burst has 3 or more frames**.
      - Otherwise fall back to scene-level z-scores. If the scene also has fewer than 3 frames, use global percentiles.
      - M1 uses global stats only, until bursts exist (M3).
@@ -245,8 +245,8 @@ tests/
    - Stage 1 `scan`: inventory into `files`, folder hint, new/changed/missing detection, path-length warnings.
    - `exif_io` (stay_open; batch read; XMP write to JPG/HEIC/NEF sidecar), plus a digiKam keyword round-trip test.
    - `manifest`, `dedupe`, `pair`.
-   - Preview loader (JPG → NEF embedded preview → rawpy; HEIC via pillow-heif; orientation).
-   - Exposure and global-stats blur, with score caching.
+   - Preview loader (JPG → HEIC via pillow-heif → NEF embedded preview via `rawpy.extract_thumb` → rawpy half-size decode; orientation).
+   - `analyze`: exposure and global-stats blur, with score caching keyed by analyser version | preview size | source picture hash, and a TSV report per run.
    - `flag --advisory`.
    - Run on a **copy** inside `sample_photos/` and check the result in digiKam.
    - Expected results on `sample_photos/`:

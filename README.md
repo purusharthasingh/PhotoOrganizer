@@ -318,7 +318,9 @@ Hashing only the image data means a copy still matches after its metadata change
 
 ### Stage 3 — Analyze
 
-Results are cached in SQLite, keyed by `(capture_id, metric, model_version)`. Re-runs skip work that's already cached.
+Run it with `python cli.py analyze <root>`. It runs Stage 2 first, then decodes one preview per capture (JPG, then HEIC, then the NEF's embedded JPEG via `rawpy`, then a half-size raw decode as a last resort), in parallel threads. It only reads photo files.
+
+Results are cached in SQLite, keyed by `(capture_id, metric, model_version)`. `model_version` is `<analyser version>|<preview long edge>|<source picture hash>`. Scores are recomputed when the code, the preview size or the actual picture changes, but **not** when labels are written into a JPG. Each run also writes a full TSV report to `<root>/.photoorganizer/reports/analyze-<time>.tsv` for calibration.
 
 - **Exposure (CPU):**
   - Compute luminance Y on a 0–255 scale.
@@ -326,8 +328,11 @@ Results are cached in SQLite, keyed by `(capture_id, metric, model_version)`. Re
   - Also record the mean, p1, p50 and p99.
 - **Blur and shake (CPU):**
   - Resize to about 2048 px on the long edge.
-  - Compute variance of the Laplacian and Tenengrad.
-  - Score each frame **relative to its burst** (z-scores), never against a single global threshold.
+  - Compute variance of the Laplacian and Tenengrad, plus both divided by the frame's luminance variance (`lap_norm`, `ten_norm`).
+  - Judge on the **contrast-normalised** values. Raw gradient energy scales with contrast, so a dark but sharp photo would otherwise look blurry. On the samples, the dark `DSC_9478` moved from z = −2.4 to +0.6.
+  - Score each frame **relative to its burst** (z-scores of the log values, mean of both measures), never against a single global threshold. Milestone 1 compares against all captures in the run until bursts exist.
+  - Near-black frames (p99 < 20) have no detail to judge. They get no blur verdict and are left out of the comparison.
+  - Known limit: a whole-frame score can't tell intentional background blur (bokeh) from a missed shot. `Spring Musings/DSC_0774` is flagged for this reason. The AF-point focus check (Milestone 3) is the fix.
   - Detect shake with FFT or gradient anisotropy: motion blur is directional.
 - **Missed focus:**
   - Where the AF area comes from, in order:
@@ -459,7 +464,8 @@ Every value below is a **starting point to be calibrated** in Milestone 2. They 
 | Overexposed | `clip_hi > A and p50 > B` | A = 0.05, B = 170 |
 | Underexposed | `(mean < C and p99 < D) or clip_lo > E` | C = 50, D = 180, E = 0.30 |
 | Exposure auto-reject (captures with a NEF) | `paired` and `nef_only` captures have raw headroom, so they're flagged for review only, except in extreme cases. `jpg_only` and `single` have no raw to recover from. | `clip_hi > 0.25` |
-| Blur | Burst-relative z-score of Laplacian variance / Tenengrad. Bursts with fewer than 3 frames fall back to scene-level z-scores, then to global percentiles. | z < −1.5 (proposed) |
+| Blur | Burst-relative z-score of contrast-normalised Laplacian variance / Tenengrad. Bursts with fewer than 3 frames fall back to scene-level z-scores, then to global percentiles. | z < −1.5 (proposed) |
+| Blur: no detail | near-black frames (p99 below this) get no blur verdict | p99 < 20 |
 | Missed focus | `sharpness(AF box) / sharpness(frame)` | < ~1.0 |
 | Exact duplicate copy | same file type + identical `ImageDataHash` (SHA-256 of image data) + matching capture metadata | exact match; no threshold |
 | Near-duplicate | pHash Hamming distance | ≤ 6–8 |
@@ -588,7 +594,7 @@ python cli.py snapshot D:\Photos\2024                 # Stage 0: fingerprint eve
 python cli.py verify   D:\Photos\2024 [--against E:\Backup] # Stage 0: check library or backup
 python cli.py scan     D:\Photos\2024                 # Stage 1: inventory files (new/changed/missing)
 python cli.py pair     D:\Photos\2024                 # Stage 2: hash, dedupe, pair
-python cli.py analyze  D:\Photos\2024 [--gpu]         # exposure, blur, focus (+ IQA)
+python cli.py analyze  D:\Photos\2024 [--gpu]         # Stage 3: exposure, blur (focus in M3, IQA in M4)
 python cli.py group    D:\Photos\2024 [--gpu]         # bursts, scenes, dupes, clusters
 python cli.py flag     D:\Photos\2024 [--advisory]    # write XMP (advisory = pending only)
 python cli.py sync     D:\Photos\2024                 # read human decisions back from XMP
@@ -617,10 +623,10 @@ python cli.py check    D:\Photos\2024                 # untracked/missing files,
   - `Cheesecake/Also Cheesecake`: `DSC_0618`–`0620` (NEF + JPG) have the same image data as the copies in `Cheesecake/`. All 6 files are `duplicate_copy`, the keepers stay in `Cheesecake/` (the fuller folder), and the folder is reported as a 100% duplicate folder.
   - `Puerto Rico 26`: `DSC_9474`–`9476` and `9480` are `paired` (NEF in the `Raw/` subfolder); `DSC_9477`–`9479` are `jpg_only`. All seven get folder `Puerto Rico 26`.
   - Still to add (on copies, inside `sample_photos/`): a sibling-folder pair, a `nef_only` capture, the same stem with different capture data, a JPG copy with edited metadata, a partly overlapping folder, and two copies with conflicting human labels
-- [ ] Preview loader: JPG first, then the NEF embedded preview (`exiftool -b -JpgFromRaw` / `PreviewImage`), with `rawpy` as a last resort; HEIC via `pillow-heif`; apply orientation
-- [ ] `exposure.py`: Y histogram stats + flags
-- [ ] `blur.py`: Laplacian variance + Tenengrad at 2048 px (global stats for now; burst-relative z-scores in M3)
-- [ ] Score caching by `(capture_id, metric, model_version)`
+- [x] Preview loader: JPG first, then HEIC via `pillow-heif`, then the NEF embedded preview (`rawpy.extract_thumb`), with a `rawpy` half-size decode as a last resort; apply orientation
+- [x] `exposure.py`: Y histogram stats + flags
+- [x] `blur.py`: Laplacian variance + Tenengrad at 2048 px, contrast-normalised (global stats for now; burst-relative z-scores in M3)
+- [x] Score caching by `(capture_id, metric, model_version)`
 - [ ] `flag.py --advisory`: write `PickLabel=2`, `Label=Yellow` and reason keywords to every existing file of each capture
 - [ ] Run on a **copy** of one sample folder and check the results in digiKam
 

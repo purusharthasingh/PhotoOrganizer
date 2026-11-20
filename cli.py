@@ -203,6 +203,48 @@ def cmd_pair(args) -> int:
     return 1 if (res.unreadable or s.errors) else 0
 
 
+def cmd_analyze(args) -> int:
+    from collections import Counter
+
+    from photo_organizer.analysis import run_analyze
+    from photo_organizer.exif_io import Exif
+
+    cfg = config_mod.load(args.config)
+    root = _root(args, cfg)
+    conn = manifest.connect(root)
+    try:
+        with Exif() as exif:
+            res = run_analyze(root, cfg, conn, exif, workers=args.workers)
+    finally:
+        conn.close()
+
+    print(f"Analyzed {len(res.scores)} captures: {res.computed} computed, {res.cached} cached"
+          f" (advisory only; nothing is written to photo files)")
+    if res.blur_skipped:
+        print("  Blur: too few captures to compare sharpness; no blur flags.")
+    counts = Counter(r for s in res.scores for r, _ in s.reasons)
+    extreme = sum(1 for s in res.scores for _, x in s.reasons if x)
+    print("Flags: " + (", ".join(f"{n} {r}" for r, n in counts.most_common()) or "none")
+          + (f"  ({extreme} extreme)" if extreme else ""))
+
+    rows = res.scores if args.verbose else [s for s in res.scores if s.reasons]
+    if rows:
+        print(f"\n{'capture':34s} {'mean':>5s} {'p50':>5s} {'clip_hi':>7s} {'clip_lo':>7s}"
+              f" {'lap_var':>8s} {'z':>5s}  reasons")
+        for s in sorted(rows, key=lambda s: (s.folder, s.source_path)):
+            m = s.metrics
+            if not m:
+                continue
+            z = f"{s.sharpness_z:5.2f}" if s.sharpness_z is not None else "    -"
+            why = ", ".join(r + (" (extreme)" if x else "") for r, x in s.reasons) or "-"
+            print(f"{s.source_path[:34]:34s} {m['mean']:5.0f} {m['p50']:5.0f} {m['clip_hi']:7.3f}"
+                  f" {m['clip_lo']:7.3f} {m['lap_var']:8.0f} {z}  {why}")
+    _print_list("Too dark to judge sharpness (no blur verdict)", res.no_detail, 10**9)
+    _print_list("ERRORS (could not analyze)", res.errors, 10**9)
+    print(f"\nFull report: {res.report_path}")
+    return 1 if res.errors else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cli.py", description="PhotoOrganizer culling pipeline")
     parser.add_argument("--config", help="path to config.toml (default: the project's)")
@@ -229,6 +271,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("root", nargs="?", help="folder (default: [library] root in config.toml)")
     p.add_argument("-v", "--verbose", action="store_true", help="list every capture")
     p.set_defaults(func=cmd_pair)
+
+    p = sub.add_parser("analyze", help="Stage 3: exposure and blur scores (read-only, advisory)")
+    p.add_argument("root", nargs="?", help="folder (default: [library] root in config.toml)")
+    p.add_argument("-v", "--verbose", action="store_true", help="show every capture, not just flagged")
+    p.add_argument("--workers", type=int, help="parallel decodes (default: min(8, CPUs))")
+    p.set_defaults(func=cmd_analyze)
 
     args = parser.parse_args(argv)
     try:
