@@ -130,6 +130,14 @@
      - The pipeline owns the `burst|`, `scene|`, `dup|`, `subject|` and `dupcopy|` namespaces. It rewrites them on every write and never touches other keywords.
 
 5. **Flag:** compute one decision per `capture_id` and write it to every file that exists for that capture: the JPG/HEIC embedded XMP and/or the NEF sidecar. Advisory mode (M1–M4) writes only Pending plus reason keywords.
+   - Dry run by default; `--apply` writes, after taking a snapshot.
+   - Writes the diff between desired and current XMP only (idempotent), and removes its own stale labels.
+   - Skips any capture with a human pick label, colour label or rating.
+   - Reconciles only `cull|` and `dupcopy|` in M1.
+   - Never writes raws.
+   - Re-hashes the picture data of written JPG/HEIC files afterwards.
+   - Duplicate copies get `cull|pending|duplicate_copy` + `dupcopy|<keeper>`; variants and conflicts get nothing.
+   - No `EXIF:Rating` in advisory mode.
 
 6. **Review in digiKam:**
    - Filter by Pick Label, using the Survey tool or the light table.
@@ -248,7 +256,7 @@ tests/
    - Preview loader (JPG → HEIC via pillow-heif → NEF embedded preview via `rawpy.extract_thumb` → rawpy half-size decode; orientation).
    - `analyze`: exposure and global-stats blur, with score caching keyed by analyser version | preview size | source picture hash, and a TSV report per run.
    - `flag --advisory`.
-   - Run on a **copy** inside `sample_photos/` and check the result in digiKam.
+   - Run on a **copy** (`sandbox/flag_test/`, git-ignored; `sample_photos/` stays unmodified) and check the result in digiKam.
    - Expected results on `sample_photos/`:
      - `Birb`, `Cheesecake`, `Spring Musings`: 14 captures, all `paired` in the same folder.
      - `Cheesecake/Also Cheesecake`: `DSC_0618`–`0620` NEF+JPG are exact copies of those in `Cheesecake/`. All 6 files are `duplicate_copy`, the keepers stay in `Cheesecake/`, and the folder is reported as a 100% duplicate folder.

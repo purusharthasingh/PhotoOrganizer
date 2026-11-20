@@ -62,14 +62,17 @@ def _draft(im: Image.Image, long_edge: int) -> None:
 
 
 def _open_pil(data_or_path, long_edge: int, orientation: int | None = None) -> np.ndarray:
-    im = Image.open(data_or_path)
-    _draft(im, long_edge)
-    if orientation is None:
-        im = ImageOps.exif_transpose(im)
-    elif orientation in _TRANSPOSE:
-        im = im.transpose(_TRANSPOSE[orientation])
-    im = _shrink(im.convert("RGB"), long_edge)
-    return np.asarray(im)
+    # Close the file promptly: on Windows an open handle blocks exiftool from
+    # replacing the file when labels are written later in the same run.
+    with Image.open(data_or_path) as src:
+        _draft(src, long_edge)
+        im = src
+        if orientation is None:
+            im = ImageOps.exif_transpose(im)
+        elif orientation in _TRANSPOSE:
+            im = im.transpose(_TRANSPOSE[orientation])
+        im = _shrink(im.convert("RGB"), long_edge)
+        return np.asarray(im)
 
 
 def _nef(path: Path, long_edge: int, orientation: int | None) -> tuple[np.ndarray, str]:

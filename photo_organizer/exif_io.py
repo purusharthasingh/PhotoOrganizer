@@ -16,6 +16,7 @@ from exiftool.exceptions import ExifToolException
 # -charset filename=utf8: non-ASCII paths on Windows. Numeric (-n) output is chosen per call.
 COMMON_ARGS = ["-charset", "filename=utf8"]
 HASH_ARGS = ["-api", "ImageHashType=SHA256"]
+RAW_SUFFIXES = {".nef", ".nrw", ".cr2", ".cr3", ".arw", ".raf", ".orf", ".rw2", ".dng"}
 
 
 class ExifError(RuntimeError):
@@ -69,6 +70,21 @@ class Exif:
         """
         rows = self._rows([_key(p) for p in paths], ["ImageDataHash"], HASH_ARGS)
         return {k: str(r.get("ImageDataHash") or "") for k, r in rows.items()}
+
+    def write(self, path: Path | str, args: list[str]) -> None:
+        """Write tags to one file in place (exiftool -overwrite_original).
+
+        Writing to a .xmp path that doesn't exist creates that sidecar. Refuses raw
+        files: raws are read-only in this project.
+        """
+        p = Path(path)
+        if p.suffix.lower() in RAW_SUFFIXES:
+            raise ExifError(f"refusing to write to a raw file: {p}")
+        self._et.execute("-overwrite_original", *args, _key(p))
+        status = self._et.last_status
+        stderr = (self._et.last_stderr or "").strip()
+        if status != 0 or "Error" in stderr:
+            raise ExifError(f"exiftool failed on {p}: {stderr or f'status {status}'}")
 
     def read_tags(self, paths: list[Path | str], tags: list[str],
                   numeric: bool = True) -> dict[str, dict]:

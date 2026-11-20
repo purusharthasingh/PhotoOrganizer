@@ -7,7 +7,7 @@ PhotoOrganizer is a local photo culling pipeline built from free tools. It works
 - writes those suggestions as **XMP metadata** you can review in digiKam
 - moves rejected photos to a quarantine folder, never deleting anything and always keeping NEF+JPG pairs together
 
-> **Status: pre-alpha.** The design is done (see [`PLAN.md`](PLAN.md)). No code exists yet.
+> **Status: Milestone 1 done** (snapshot, scan, pairing and duplicates, exposure and blur scores, advisory flags), apart from the manual digiKam check. Next: Milestone 2, calibration.
 > Work through the [Roadmap](#roadmap--build-checklist) in order.
 
 ---
@@ -24,6 +24,7 @@ PhotoOrganizer is a local photo culling pipeline built from free tools. It works
 - [SQLite manifest](#sqlite-manifest)
 - [Proposed project layout and CLI](#proposed-project-layout-and-cli)
 - [Roadmap / build checklist](#roadmap--build-checklist)
+- [Checking flags in digiKam](#checking-flags-in-digikam)
 - [Calibration workflow](#calibration-workflow)
 - [Gotchas](#gotchas)
 - [Backup and recovery](#backup-and-recovery)
@@ -389,6 +390,16 @@ Notes on the formats:
 
 - Compute **one decision per `capture_id`** and write it to every file that exists for that capture: the JPG's embedded XMP and/or the NEF's `.NEF.xmp` sidecar. A `nef_only` or `jpg_only` capture gets just its one file written.
 - In advisory mode (Milestones 1–4), the script writes only Pending plus reason keywords.
+- Run it with `python cli.py flag <root>`. That is a **dry run** listing every planned change. Add `--apply` to write.
+- How it writes:
+  - **Desired state, not blind writes.** For each picture file it compares the pipeline's desired labels with what the XMP already holds, and writes only the difference. A re-run with nothing new writes nothing. When a flag goes away (for example after recalibration), the pipeline removes its own Pending label and keywords.
+  - **Humans win.** A capture with any human pick label, colour label or rating, on any of its files, is left completely alone. The pipeline's own labels (`PickLabel=2` + `Yellow` alongside a `cull|pending|…` keyword) are recognised and not mistaken for human ones.
+  - **Owned namespaces only.** Milestone 1 reconciles `cull|` and `dupcopy|`. Every other keyword, such as your own `People|Mom`, is preserved.
+  - **Raws are never written.** A NEF's labels go to `X.NEF.xmp`, which is created if missing. `exif_io` refuses any write to a raw file.
+  - **Duplicate copies** get `cull|pending|duplicate_copy` + `dupcopy|<keeper capture_id>` on their own files. Variants and conflict copies get no labels.
+  - **Safety checks.** `--apply` takes a Stage 0 snapshot first. After writing, it re-hashes the picture data of every written JPG/HEIC and fails loudly if any changed. Machine decisions are recorded in `decisions` (`source=machine`).
+  - `EXIF:Rating` is not written in advisory mode (Pending has no stars, and the camera already writes 0).
+- Afterwards, in digiKam: select the photos, then *Item → Reread Metadata From File*.
 
 ### Stage 6 — Review in digiKam
 
@@ -596,7 +607,7 @@ python cli.py scan     D:\Photos\2024                 # Stage 1: inventory files
 python cli.py pair     D:\Photos\2024                 # Stage 2: hash, dedupe, pair
 python cli.py analyze  D:\Photos\2024 [--gpu]         # Stage 3: exposure, blur (focus in M3, IQA in M4)
 python cli.py group    D:\Photos\2024 [--gpu]         # bursts, scenes, dupes, clusters
-python cli.py flag     D:\Photos\2024 [--advisory]    # write XMP (advisory = pending only)
+python cli.py flag     D:\Photos\2024 [--apply]       # Stage 5: Pending labels to XMP (dry run unless --apply)
 python cli.py sync     D:\Photos\2024                 # read human decisions back from XMP
 python cli.py cleanup  D:\Photos\2024 [--apply]       # dry-run unless --apply
 python cli.py check    D:\Photos\2024                 # untracked/missing files, collisions, integrity, path length
@@ -614,21 +625,22 @@ python cli.py check    D:\Photos\2024                 # untracked/missing files,
 - [x] Stage 1 scan: recursive inventory into the `files` table (size, mtime, kind), the folder hint (format subfolders ignored), new/changed/missing detection between scans, and warnings for paths over 240 characters
 - [x] `exif_io.py`: pyexiftool `stay_open` wrapper; batch read
 - [ ] `exif_io.py`: XMP write for JPG, HEIC and the NEF sidecar (Stage 5)
-- [ ] Verify the keyword field formats with a digiKam round-trip (write → reread in digiKam → write back → diff)
+- [ ] **(Manual, you)** Verify the keyword field formats with a digiKam round-trip (write → reread in digiKam → write back → diff). See [Checking flags in digiKam](#checking-flags-in-digikam).
 - [x] `manifest.py`: create the schema; upsert photos
 - [x] `pair.py`: recursive scan; stem index across folders (same, sibling and subfolder); confirm on DTO/SubSec/ShutterCount/Serial; nearest-match tie-break; `paired` / `nef_only` / `jpg_only` / `single` statuses; collision report; stable `capture_id` across re-scans
 - [x] `dedupe.py`: ImageDataHash (SHA-256, metadata excluded) cached by path/size/mtime; exact-copy groups; keeper rules (human decisions → paired → fuller folder → preferred roots → oldest/shortest); conflict report; duplicate-folder and overlap report; mark copies `duplicate_copy` (pending in advisory mode)
-- [ ] Pairing test cases in `sample_photos/`. Expected results for the current set:
+- [x] Pairing test cases. Expected results for the current `sample_photos/` set:
   - `Birb`, `Cheesecake`, `Spring Musings`: 14 captures, all `paired` in the same folder
   - `Cheesecake/Also Cheesecake`: `DSC_0618`–`0620` (NEF + JPG) have the same image data as the copies in `Cheesecake/`. All 6 files are `duplicate_copy`, the keepers stay in `Cheesecake/` (the fuller folder), and the folder is reported as a 100% duplicate folder.
   - `Puerto Rico 26`: `DSC_9474`–`9476` and `9480` are `paired` (NEF in the `Raw/` subfolder); `DSC_9477`–`9479` are `jpg_only`. All seven get folder `Puerto Rico 26`.
-  - Still to add (on copies, inside `sample_photos/`): a sibling-folder pair, a `nef_only` capture, the same stem with different capture data, a JPG copy with edited metadata, a partly overlapping folder, and two copies with conflicting human labels
+  - Edge cases built in temp folders by `tests/test_pair.py` (never inside `sample_photos/`, which stays unmodified): a sibling-folder pair, a `nef_only` capture, the same stem with different capture data, a JPG copy with edited metadata, a partly overlapping folder, two copies with conflicting human labels, a variant, and a phone photo
 - [x] Preview loader: JPG first, then HEIC via `pillow-heif`, then the NEF embedded preview (`rawpy.extract_thumb`), with a `rawpy` half-size decode as a last resort; apply orientation
 - [x] `exposure.py`: Y histogram stats + flags
 - [x] `blur.py`: Laplacian variance + Tenengrad at 2048 px, contrast-normalised (global stats for now; burst-relative z-scores in M3)
 - [x] Score caching by `(capture_id, metric, model_version)`
-- [ ] `flag.py --advisory`: write `PickLabel=2`, `Label=Yellow` and reason keywords to every existing file of each capture
-- [ ] Run on a **copy** of one sample folder and check the results in digiKam
+- [x] `flag.py --advisory`: write `PickLabel=2`, `Label=Yellow` and reason keywords to every existing file of each capture
+- [x] Run on a **copy** of the sample set (`sandbox/flag_test/`, git-ignored): 12 files labelled, 5 sidecars created, pictures and NEFs verified unchanged, re-run is a no-op
+- [ ] **(Manual, you)** Check the results in digiKam (see below)
 
 ### Milestone 2: calibration
 
@@ -668,6 +680,19 @@ python cli.py check    D:\Photos\2024                 # untracked/missing files,
 - [ ] Enable auto-reject **only** for high-confidence cases (e.g. `clip_hi > 0.25`, extreme blur outliers)
 
 ---
+
+## Checking flags in digiKam
+
+This is the manual end of Milestone 1. It confirms that digiKam reads the pipeline's labels and writes them back in the same format.
+
+1. Run `python cli.py flag sandbox/flag_test --apply` on a copy (the Milestone 1 run already did this).
+2. In digiKam, add `sandbox/flag_test` as a collection, select all, then run *Item → Reread Metadata From File*.
+3. Check that:
+   - the flagged photos show the **Pending** pick label and a **Yellow** colour label
+   - the tag tree has `cull → pending → blur / underexposed / duplicate_copy` and `dupcopy → <capture id>`
+   - for a NEF+JPG pair, both show the labels (the NEF reads them from its `.NEF.xmp` sidecar)
+4. Round-trip: change nothing, select all, run *Item → Write Metadata to Files*, then run `python cli.py flag sandbox/flag_test` (a dry run). It should report **0 files to update**. If it plans changes, digiKam wrote the fields in a different form, so note which field and we adjust `flag.py`.
+5. Override test: set one flagged photo to **Accepted** in digiKam, write metadata to files, and dry-run `flag` again. That capture should be listed under "Left alone: captures with a human decision".
 
 ## Calibration workflow
 

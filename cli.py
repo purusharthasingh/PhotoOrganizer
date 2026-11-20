@@ -245,6 +245,46 @@ def cmd_analyze(args) -> int:
     return 1 if res.errors else 0
 
 
+def cmd_flag(args) -> int:
+    from collections import Counter
+
+    from photo_organizer.exif_io import Exif
+    from photo_organizer.flag import run_flag
+
+    cfg = config_mod.load(args.config)
+    root = _root(args, cfg)
+    conn = manifest.connect(root)
+    try:
+        with Exif() as exif:
+            res = run_flag(root, cfg, conn, exif, apply=args.apply)
+    finally:
+        conn.close()
+    limit = 10**9 if args.verbose else 25
+
+    flagged = Counter(r for op in res.ops for r in op.reasons)
+    new_sidecars = sum(op.creates_sidecar for op in res.ops)
+    mode = "APPLIED" if res.applied else "DRY RUN (nothing written; add --apply)"
+    print(f"Flag, advisory mode: {mode}")
+    print(f"  {len(res.ops)} file(s) to update ({new_sidecars} new NEF sidecar(s)),"
+          f" {res.unchanged} already up to date")
+    if flagged:
+        print("  Pending reasons (per file): " + ", ".join(f"{n} {r}" for r, n in flagged.most_common()))
+    _print_list("Changes", [f"{op.target}: {op.summary}" + (" [new sidecar]" if op.creates_sidecar else "")
+                            for op in res.ops], limit)
+    _print_list("Left alone: captures with a human decision", res.human_skipped, limit)
+    if res.applied:
+        print(f"\nSnapshot taken before writing: {res.snapshot_path}")
+        print(f"Written: {len(res.written)} file(s)")
+        _print_list("ERRORS", res.errors, 10**9)
+        if res.picture_changed:
+            _print_list("!!! PICTURE DATA CHANGED (should never happen) — restore these from"
+                        " backup and report", res.picture_changed, 10**9)
+        else:
+            print("Picture data re-checked: unchanged in every written JPG/HEIC.")
+        print("In digiKam: select the photos, then Item -> Reread Metadata From File.")
+    return 1 if (res.errors or res.picture_changed) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cli.py", description="PhotoOrganizer culling pipeline")
     parser.add_argument("--config", help="path to config.toml (default: the project's)")
@@ -277,6 +317,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-v", "--verbose", action="store_true", help="show every capture, not just flagged")
     p.add_argument("--workers", type=int, help="parallel decodes (default: min(8, CPUs))")
     p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("flag", help="Stage 5: write Pending labels to XMP (dry run unless --apply)")
+    p.add_argument("root", nargs="?", help="folder (default: [library] root in config.toml)")
+    p.add_argument("--apply", action="store_true", help="actually write (takes a snapshot first)")
+    p.add_argument("--advisory", action="store_true", default=True,
+                   help="Pending labels only (the only mode until Milestone 5)")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(func=cmd_flag)
 
     args = parser.parse_args(argv)
     try:
